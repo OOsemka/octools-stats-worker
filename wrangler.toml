@@ -14,3 +14,4 @@ database_id = "81e0f9fa-cacc-49f6-90d8-18f6cba834ea"
 
 [vars]
 ENVIRONMENT = "production"
+ADMIN_TOKEN = "oct-admin-2026-seed"

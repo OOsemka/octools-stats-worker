@@ -6,15 +6,20 @@
  * a SHA-256 hash of the cluster UUID used for rating dedup.
  *
  * Endpoints:
- *   GET  /v1/stats            — aggregated stats for all tools
- *   POST /v1/stats/download   — increment download counter
- *   POST /v1/stats/rating     — upsert a cluster's rating
- *   DELETE /v1/stats/rating   — remove a cluster's rating
- *   GET  /health              — health check
+ *   GET  /v1/stats              — aggregated stats for all tools
+ *   POST /v1/stats/download     — increment download counter
+ *   POST /v1/stats/rating       — upsert a cluster's rating
+ *   DELETE /v1/stats/rating     — remove a cluster's rating
+ *   GET  /v1/versions           — all tool versions grouped by tool_id
+ *   GET  /v1/versions/:toolId   — versions for a single tool
+ *   POST /v1/versions           — upsert a version row (admin-only)
+ *   GET  /v1/catalog            — catalog format with stats + versions
+ *   GET  /health                — health check
  */
 
 export interface Env {
   DB: D1Database;
+  ADMIN_TOKEN: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -26,7 +31,8 @@ function json(data: unknown, status = 200, cacheSeconds = 0): Response {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400',
   };
   if (cacheSeconds > 0) {
     headers['Cache-Control'] = `public, max-age=${cacheSeconds}`;
@@ -60,13 +66,47 @@ function isRateLimited(ip: string): boolean {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Auth helper                                                       */
+/* ------------------------------------------------------------------ */
+
+function isAuthorized(request: Request, env: Env): boolean {
+  const authHeader = request.headers.get('Authorization') || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  return token === env.ADMIN_TOKEN;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Version types                                                     */
+/* ------------------------------------------------------------------ */
+
+interface ToolVersionRow {
+  tool_id: string;
+  version: string;
+  channel: string;
+  openshift: string;
+  image: string;
+  git_ref: string | null;
+  deploy_url: string | null;
+  updated_at: string;
+}
+
+interface VersionEntry {
+  version: string;
+  channel: string;
+  openshift: string;
+  image: string;
+  gitRef: string | null;
+  deployUrl: string | null;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Handlers                                                          */
 /* ------------------------------------------------------------------ */
 
 /**
  * Returns stats in the PublicCatalog format expected by the storefront sidecar.
- * The sidecar calls GET COMMUNITY_TOOLS_CATALOG_URL and expects:
- * { extensions: [{ id, consolePlugin, downloads, rating: { average, count } }] }
+ * Now includes versions[] per extension, grouped by (tool_id, version, channel)
+ * with openshift values collected into an array.
  */
 async function handleGetCatalog(db: D1Database): Promise<Response> {
   const statsRows = await db
@@ -83,6 +123,10 @@ async function handleGetCatalog(db: D1Database): Promise<Response> {
     )
     .all<{ tool_id: string; rating_count: number; rating_avg: number }>();
 
+  const versionRows = await db
+    .prepare('SELECT tool_id, version, channel, openshift, image, git_ref, deploy_url FROM tool_versions ORDER BY tool_id, version')
+    .all<ToolVersionRow>();
+
   const toolMap = new Map<string, { downloads: number; ratingCount: number; ratingAvg: number }>();
   for (const row of statsRows.results) {
     toolMap.set(row.tool_id, { downloads: row.downloads, ratingCount: 0, ratingAvg: 0 });
@@ -97,15 +141,57 @@ async function handleGetCatalog(db: D1Database): Promise<Response> {
     }
   }
 
-  const extensions = Array.from(toolMap.entries()).map(([id, data]) => ({
-    id,
-    consolePlugin: id,
-    downloads: data.downloads,
-    rating: {
-      average: data.ratingAvg,
-      count: data.ratingCount,
-    },
-  }));
+  // Group versions by (tool_id, version, channel) and collect openshift into arrays
+  const versionsByTool = new Map<string, Map<string, { version: string; channel: string; openshift: string[]; image: string; gitRef: string | null; deployUrl: string | null }>>();
+  for (const row of versionRows.results) {
+    if (!versionsByTool.has(row.tool_id)) {
+      versionsByTool.set(row.tool_id, new Map());
+    }
+    const toolVersions = versionsByTool.get(row.tool_id)!;
+    const key = `${row.version}|${row.channel}`;
+    const existing = toolVersions.get(key);
+    if (existing) {
+      existing.openshift.push(row.openshift);
+    } else {
+      toolVersions.set(key, {
+        version: row.version,
+        channel: row.channel,
+        openshift: [row.openshift],
+        image: row.image,
+        gitRef: row.git_ref,
+        deployUrl: row.deploy_url,
+      });
+    }
+    // Ensure the tool appears in toolMap even if it has no stats
+    if (!toolMap.has(row.tool_id)) {
+      toolMap.set(row.tool_id, { downloads: 0, ratingCount: 0, ratingAvg: 0 });
+    }
+  }
+
+  const extensions = Array.from(toolMap.entries()).map(([id, data]) => {
+    const toolVersions = versionsByTool.get(id);
+    const versions = toolVersions
+      ? Array.from(toolVersions.values()).map(v => ({
+          version: v.version,
+          channel: v.channel,
+          openshift: v.openshift,
+          image: v.image,
+          ...(v.gitRef ? { gitRef: v.gitRef } : {}),
+          ...(v.deployUrl ? { deployUrl: v.deployUrl } : {}),
+        }))
+      : [];
+
+    return {
+      id,
+      consolePlugin: id,
+      downloads: data.downloads,
+      rating: {
+        average: data.ratingAvg,
+        count: data.ratingCount,
+      },
+      versions,
+    };
+  });
 
   return json({
     extensions,
@@ -128,7 +214,6 @@ async function handleGetStats(db: D1Database): Promise<Response> {
     )
     .all<{ tool_id: string; rating_count: number; rating_avg: number }>();
 
-  // Merge into a single map
   const toolMap = new Map<string, { downloads: number; ratingCount: number; ratingAvg: number }>();
 
   for (const row of statsRows.results) {
@@ -158,7 +243,7 @@ async function handleGetStats(db: D1Database): Promise<Response> {
     tools[id] = data;
   }
 
-  return json({ tools, timestamp: new Date().toISOString() }, 200, 300); // cache 5 min
+  return json({ tools, timestamp: new Date().toISOString() }, 200, 300);
 }
 
 async function handlePostDownload(request: Request, db: D1Database): Promise<Response> {
@@ -247,6 +332,107 @@ async function handleDeleteRating(request: Request, db: D1Database): Promise<Res
 }
 
 /* ------------------------------------------------------------------ */
+/*  Version handlers                                                  */
+/* ------------------------------------------------------------------ */
+
+async function handleGetVersions(db: D1Database): Promise<Response> {
+  const rows = await db
+    .prepare('SELECT tool_id, version, channel, openshift, image, git_ref, deploy_url, updated_at FROM tool_versions ORDER BY tool_id, version')
+    .all<ToolVersionRow>();
+
+  const versions: Record<string, VersionEntry[]> = {};
+  for (const row of rows.results) {
+    if (!versions[row.tool_id]) {
+      versions[row.tool_id] = [];
+    }
+    versions[row.tool_id].push({
+      version: row.version,
+      channel: row.channel,
+      openshift: row.openshift,
+      image: row.image,
+      gitRef: row.git_ref,
+      deployUrl: row.deploy_url,
+    });
+  }
+
+  return json({ versions }, 200, 300);
+}
+
+async function handleGetVersionsByTool(db: D1Database, toolId: string): Promise<Response> {
+  const rows = await db
+    .prepare('SELECT tool_id, version, channel, openshift, image, git_ref, deploy_url, updated_at FROM tool_versions WHERE tool_id = ? ORDER BY version')
+    .bind(toolId)
+    .all<ToolVersionRow>();
+
+  const versions: VersionEntry[] = rows.results.map(row => ({
+    version: row.version,
+    channel: row.channel,
+    openshift: row.openshift,
+    image: row.image,
+    gitRef: row.git_ref,
+    deployUrl: row.deploy_url,
+  }));
+
+  return json({ toolId, versions }, 200, 300);
+}
+
+async function handlePostVersion(request: Request, db: D1Database, env: Env): Promise<Response> {
+  if (!isAuthorized(request, env)) {
+    return errorResponse(401, 'Unauthorized: invalid or missing admin token');
+  }
+
+  let body: {
+    toolId?: string;
+    version?: string;
+    channel?: string;
+    openshift?: string;
+    image?: string;
+    gitRef?: string;
+    deployUrl?: string;
+  };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(400, 'Invalid JSON body');
+  }
+
+  const toolId = body.toolId?.trim();
+  const version = body.version?.trim();
+  const channel = body.channel?.trim() || 'stable';
+  const openshift = body.openshift?.trim();
+  const image = body.image?.trim();
+  const gitRef = body.gitRef?.trim() || null;
+  const deployUrl = body.deployUrl?.trim() || null;
+
+  if (!toolId || toolId.length > 128) {
+    return errorResponse(400, 'Missing or invalid toolId');
+  }
+  if (!version) {
+    return errorResponse(400, 'Missing version');
+  }
+  if (!openshift) {
+    return errorResponse(400, 'Missing openshift');
+  }
+  if (!image) {
+    return errorResponse(400, 'Missing image');
+  }
+
+  await db
+    .prepare(
+      `INSERT INTO tool_versions (tool_id, version, channel, openshift, image, git_ref, deploy_url, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(tool_id, version, openshift)
+       DO UPDATE SET channel = excluded.channel, image = excluded.image,
+                     git_ref = excluded.git_ref, deploy_url = excluded.deploy_url,
+                     updated_at = datetime('now')`
+    )
+    .bind(toolId, version, channel, openshift, image, gitRef, deployUrl)
+    .run();
+
+  return json({ ok: true, toolId, version, openshift });
+}
+
+/* ------------------------------------------------------------------ */
 /*  Router                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -263,7 +449,7 @@ export default {
         headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
           'Access-Control-Max-Age': '86400',
         },
       });
@@ -271,7 +457,7 @@ export default {
 
     // Health check
     if (pathname === '/health' && method === 'GET') {
-      return json({ ok: true, version: '1.0.0' });
+      return json({ ok: true, version: '1.1.0' });
     }
 
     // GET stats (read-only, cached)
@@ -284,8 +470,24 @@ export default {
       return handleGetCatalog(env.DB);
     }
 
+    // GET /v1/versions — all tool versions
+    if (pathname === '/v1/versions' && method === 'GET') {
+      return handleGetVersions(env.DB);
+    }
+
+    // GET /v1/versions/:toolId — versions for a single tool
+    const versionMatch = pathname.match(/^\/v1\/versions\/([^/]+)$/);
+    if (versionMatch && method === 'GET') {
+      return handleGetVersionsByTool(env.DB, decodeURIComponent(versionMatch[1]));
+    }
+
     // Write endpoints — rate limit
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+
+    // POST /v1/versions — admin-only upsert (no rate limit for admin)
+    if (pathname === '/v1/versions' && method === 'POST') {
+      return handlePostVersion(request, env.DB, env);
+    }
 
     if (pathname === '/v1/stats/download' && method === 'POST') {
       if (isRateLimited(ip)) {
