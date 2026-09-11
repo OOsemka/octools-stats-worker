@@ -1,0 +1,16 @@
+name = "octools-stats"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+account_id = "0e31025ef7b101502fc8bf1c1ba1d624"
+
+routes = [
+  { pattern = "api.octools.net/*", zone_name = "octools.net" }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "octools-stats"
+database_id = "81e0f9fa-cacc-49f6-90d8-18f6cba834ea"
+
+[vars]
+ENVIRONMENT = "production"
