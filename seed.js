@@ -34,13 +34,14 @@ async function main() {
 
     const toolId = doc.metadata?.name;
     const versions = doc.spec?.versions || [];
+    const category = doc.spec?.category || null;
 
     if (!toolId || versions.length === 0) {
       console.log(`  Skipping ${toolId || '(unnamed)'}: no versions`);
       continue;
     }
 
-    console.log(`\nTool: ${toolId} (${versions.length} version rows)`);
+    console.log(`\nTool: ${toolId} (${versions.length} version rows, category: ${category || 'none'})`);
 
     for (const v of versions) {
       total++;
@@ -52,6 +53,7 @@ async function main() {
         image: v.image,
         gitRef: v.gitRef || null,
         deployUrl: v.deployUrl || null,
+        category,
       };
 
       // Throttle to avoid rate limiting (20 req/min)
