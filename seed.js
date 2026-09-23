@@ -35,6 +35,11 @@ async function main() {
     const toolId = doc.metadata?.name;
     const versions = doc.spec?.versions || [];
     const category = doc.spec?.category || null;
+    const description = doc.spec?.description || null;
+    const displayName = doc.spec?.displayName || null;
+    const href = doc.spec?.href || null;
+    const icon = doc.spec?.icon || null;
+    const git = doc.spec?.git || null;
 
     if (!toolId || versions.length === 0) {
       console.log(`  Skipping ${toolId || '(unnamed)'}: no versions`);
@@ -54,6 +59,11 @@ async function main() {
         gitRef: v.gitRef || null,
         deployUrl: v.deployUrl || null,
         category,
+        description,
+        displayName,
+        href,
+        icon,
+        git,
       };
 
       // Throttle to avoid rate limiting (20 req/min)

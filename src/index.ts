@@ -110,8 +110,8 @@ interface VersionEntry {
  */
 async function handleGetCatalog(db: D1Database): Promise<Response> {
   const statsRows = await db
-    .prepare('SELECT tool_id, downloads, category FROM tools_stats')
-    .all<{ tool_id: string; downloads: number; category: string | null }>();
+    .prepare('SELECT tool_id, downloads, category, description, display_name, href, icon, git FROM tools_stats')
+    .all<{ tool_id: string; downloads: number; category: string | null; description: string | null; display_name: string | null; href: string | null; icon: string | null; git: string | null }>();
 
   const ratingRows = await db
     .prepare(
@@ -127,9 +127,28 @@ async function handleGetCatalog(db: D1Database): Promise<Response> {
     .prepare('SELECT tool_id, version, channel, openshift, image, git_ref, deploy_url FROM tool_versions ORDER BY tool_id, version')
     .all<ToolVersionRow>();
 
-  const toolMap = new Map<string, { downloads: number; ratingCount: number; ratingAvg: number; category: string | null }>();
+  interface CatalogToolEntry {
+    downloads: number;
+    ratingCount: number;
+    ratingAvg: number;
+    category: string | null;
+    description: string | null;
+    displayName: string | null;
+    href: string | null;
+    icon: string | null;
+    git: string | null;
+  }
+  const toolMap = new Map<string, CatalogToolEntry>();
   for (const row of statsRows.results) {
-    toolMap.set(row.tool_id, { downloads: row.downloads, ratingCount: 0, ratingAvg: 0, category: row.category || null });
+    toolMap.set(row.tool_id, {
+      downloads: row.downloads, ratingCount: 0, ratingAvg: 0,
+      category: row.category || null,
+      description: row.description || null,
+      displayName: row.display_name || null,
+      href: row.href || null,
+      icon: row.icon || null,
+      git: row.git || null,
+    });
   }
   for (const row of ratingRows.results) {
     const existing = toolMap.get(row.tool_id);
@@ -137,7 +156,10 @@ async function handleGetCatalog(db: D1Database): Promise<Response> {
       existing.ratingCount = row.rating_count;
       existing.ratingAvg = row.rating_avg;
     } else {
-      toolMap.set(row.tool_id, { downloads: 0, ratingCount: row.rating_count, ratingAvg: row.rating_avg, category: null });
+      toolMap.set(row.tool_id, {
+        downloads: 0, ratingCount: row.rating_count, ratingAvg: row.rating_avg,
+        category: null, description: null, displayName: null, href: null, icon: null, git: null,
+      });
     }
   }
 
@@ -162,9 +184,11 @@ async function handleGetCatalog(db: D1Database): Promise<Response> {
         deployUrl: row.deploy_url,
       });
     }
-    // Ensure the tool appears in toolMap even if it has no stats
     if (!toolMap.has(row.tool_id)) {
-      toolMap.set(row.tool_id, { downloads: 0, ratingCount: 0, ratingAvg: 0, category: null });
+      toolMap.set(row.tool_id, {
+        downloads: 0, ratingCount: 0, ratingAvg: 0,
+        category: null, description: null, displayName: null, href: null, icon: null, git: null,
+      });
     }
   }
 
@@ -185,6 +209,11 @@ async function handleGetCatalog(db: D1Database): Promise<Response> {
       id,
       consolePlugin: id,
       ...(data.category ? { category: data.category } : {}),
+      ...(data.description ? { description: data.description } : {}),
+      ...(data.displayName ? { displayName: data.displayName } : {}),
+      ...(data.href ? { href: data.href } : {}),
+      ...(data.icon ? { icon: data.icon } : {}),
+      ...(data.git ? { git: data.git } : {}),
       downloads: data.downloads,
       rating: {
         average: data.ratingAvg,
@@ -391,6 +420,11 @@ async function handlePostVersion(request: Request, db: D1Database, env: Env): Pr
     gitRef?: string;
     deployUrl?: string;
     category?: string;
+    description?: string;
+    displayName?: string;
+    href?: string;
+    icon?: string;
+    git?: string;
   };
   try {
     body = await request.json();
@@ -406,6 +440,11 @@ async function handlePostVersion(request: Request, db: D1Database, env: Env): Pr
   const gitRef = body.gitRef?.trim() || null;
   const deployUrl = body.deployUrl?.trim() || null;
   const category = body.category?.trim() || null;
+  const description = body.description?.trim() || null;
+  const displayName = body.displayName?.trim() || null;
+  const href = body.href?.trim() || null;
+  const icon = body.icon?.trim() || null;
+  const git = body.git?.trim() || null;
 
   if (!toolId || toolId.length > 128) {
     return errorResponse(400, 'Missing or invalid toolId');
@@ -432,13 +471,21 @@ async function handlePostVersion(request: Request, db: D1Database, env: Env): Pr
     .bind(toolId, version, channel, openshift, image, gitRef, deployUrl)
     .run();
 
-  if (category) {
+  const hasMetadata = category || description || displayName || href || icon || git;
+  if (hasMetadata) {
     await db
       .prepare(
-        `INSERT INTO tools_stats (tool_id, downloads, category) VALUES (?, 0, ?)
-         ON CONFLICT(tool_id) DO UPDATE SET category = excluded.category`
+        `INSERT INTO tools_stats (tool_id, downloads, category, description, display_name, href, icon, git)
+         VALUES (?, 0, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(tool_id) DO UPDATE SET
+           category = COALESCE(excluded.category, tools_stats.category),
+           description = COALESCE(excluded.description, tools_stats.description),
+           display_name = COALESCE(excluded.display_name, tools_stats.display_name),
+           href = COALESCE(excluded.href, tools_stats.href),
+           icon = COALESCE(excluded.icon, tools_stats.icon),
+           git = COALESCE(excluded.git, tools_stats.git)`
       )
-      .bind(toolId, category)
+      .bind(toolId, category, description, displayName, href, icon, git)
       .run();
   }
 
