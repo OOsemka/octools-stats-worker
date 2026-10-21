@@ -3,7 +3,9 @@
  * Seed tool_versions from the storefront catalog/community.yaml.
  *
  * Usage:
- *   node seed.js
+ *   ADMIN_TOKEN=... CATALOG_PATH=<storefront>/catalog/community.yaml node seed.js
+ *   TOOL=oct-my-tool node seed.js     # only that tool's rows (one release)
+ *   DRY_RUN=1 node seed.js            # print the rows, write nothing
  *
  * Reads the multi-doc YAML, extracts spec.versions[] from each CommunityTool,
  * and POSTs each version row to the OCTools Stats API.
@@ -15,6 +17,9 @@ const yaml = require('js-yaml');
 const API = process.env.OCTOOLS_API || 'https://api.octools.net';
 const TOKEN = process.env.ADMIN_TOKEN || 'oct-admin-2026-seed';
 const CATALOG_PATH = process.env.CATALOG_PATH || '/home/cjanisze/Projects/oct-storefront/catalog/community.yaml';
+
+const ONLY_TOOL = process.env.TOOL || '';
+const DRY_RUN = !!process.env.DRY_RUN;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -41,6 +46,7 @@ async function main() {
     const icon = doc.spec?.icon || null;
     const git = doc.spec?.git || null;
 
+    if (ONLY_TOOL && toolId !== ONLY_TOOL) continue;
     if (!toolId || versions.length === 0) {
       console.log(`  Skipping ${toolId || '(unnamed)'}: no versions`);
       continue;
@@ -48,13 +54,17 @@ async function main() {
 
     console.log(`\nTool: ${toolId} (${versions.length} version rows, category: ${category || 'none'})`);
 
-    for (const v of versions) {
+    // The API stores one row per OpenShift minor (openshift is a string), so a
+    // catalog row listing several minors fans out into several rows.
+    const rows = versions.flatMap(v => (Array.isArray(v.openshift) ? v.openshift : [v.openshift]).map(o => ({ ...v, openshift: o })));
+
+    for (const v of rows) {
       total++;
       const payload = {
         toolId,
         version: v.version,
         channel: v.channel || 'stable',
-        openshift: Array.isArray(v.openshift) ? v.openshift[0] : v.openshift,
+        openshift: String(v.openshift),
         image: v.image,
         gitRef: v.gitRef || null,
         deployUrl: v.deployUrl || null,
@@ -65,6 +75,11 @@ async function main() {
         icon,
         git,
       };
+
+      if (DRY_RUN) {
+        console.log(`  (dry run) ${JSON.stringify({ toolId, version: payload.version, openshift: payload.openshift, image: payload.image, gitRef: payload.gitRef })}`);
+        continue;
+      }
 
       // Throttle to avoid rate limiting (20 req/min)
       if (total > 1) await sleep(200);
