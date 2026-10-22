@@ -71,7 +71,7 @@ async function main() {
         openshift: String(v.openshift),
         image: v.image,
         gitRef: v.gitRef || null,
-        deployUrl: v.deployUrl || null,
+        deployUrl: v.deployURL || v.deployUrl || null, // catalog spells it deployURL
         category,
         description,
         displayName,
