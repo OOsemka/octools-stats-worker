@@ -15,7 +15,7 @@ const fs = require('fs');
 const yaml = require('js-yaml');
 
 const API = process.env.OCTOOLS_API || 'https://api.octools.net';
-const TOKEN = process.env.ADMIN_TOKEN || 'oct-admin-2026-seed';
+const TOKEN = process.env.ADMIN_TOKEN || '';
 const CATALOG_PATH = process.env.CATALOG_PATH || '/home/cjanisze/Projects/oct-storefront/catalog/community.yaml';
 
 const ONLY_TOOL = process.env.TOOL || '';
@@ -26,6 +26,10 @@ function sleep(ms) {
 }
 
 async function main() {
+  if (!TOKEN && !process.env.DRY_RUN) {
+    console.error('ADMIN_TOKEN is required (the Worker secret); use DRY_RUN=1 to preview.');
+    process.exit(2);
+  }
   console.log(`Reading catalog from: ${CATALOG_PATH}`);
   const raw = fs.readFileSync(CATALOG_PATH, 'utf-8');
 
