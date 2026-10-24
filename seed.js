@@ -16,7 +16,7 @@ const yaml = require('js-yaml');
 
 const API = process.env.OCTOOLS_API || 'https://api.octools.net';
 const TOKEN = process.env.ADMIN_TOKEN || '';
-const CATALOG_PATH = process.env.CATALOG_PATH || '/home/cjanisze/Projects/oct-storefront/catalog/community.yaml';
+const CATALOG_PATH = process.env.CATALOG_PATH || '../oct-storefront/catalog/community.yaml';
 
 const ONLY_TOOL = process.env.TOOL || '';
 const DRY_RUN = !!process.env.DRY_RUN;
